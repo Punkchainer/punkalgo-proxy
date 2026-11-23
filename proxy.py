@@ -1226,6 +1226,26 @@ def single_tp_price(rec: dict) -> str | None:
     return fmt_price(tp, places)
 
 
+# El webhook (fast_protect) y el monitor pueden armar el mismo trade a la vez, cada uno con su
+# copia del registro (STATE.active() devuelve copias): los dos ven "sin TP" y colocan todo dos
+# veces. Se serializa el armado y, antes de armar, se trae del estado lo que el otro ya colocó.
+_ARM_LOCK = threading.RLock()
+
+
+def _serializado(fn):
+    def wrapper(rec, *args, **kwargs):
+        with _ARM_LOCK:
+            with STATE.lock:
+                row = next((r for r in STATE.positions if str(r.get("id")) == str(rec.get("id"))), None)
+                for key in ("sl_order_id", "tp_orders", "tp_plan"):
+                    if row and row.get(key):
+                        rec[key] = json.loads(json.dumps(row[key]))
+            return fn(rec, *args, **kwargs)
+    wrapper.__name__, wrapper.__doc__ = fn.__name__, fn.__doc__
+    return wrapper
+
+
+@_serializado
 def ensure_position_sl(rec: dict) -> None:
     """Coloca (o reintenta) la orden de posición con el SL de la señal."""
     if rec.get("sl_order_id"):
@@ -1263,6 +1283,7 @@ def plan_partial_tps(rec: dict) -> dict:
     return plan
 
 
+@_serializado
 def ensure_partial_tps(rec: dict) -> None:
     """Coloca los TP parciales que falten (uno por objetivo, reduce la posición)."""
     if CFG.tp_mode != "partials":
@@ -1283,6 +1304,7 @@ def ensure_partial_tps(rec: dict) -> None:
     rec["tp_orders"] = orders
 
 
+@_serializado
 def arm_protection(rec: dict, position_id: str, adopted: bool = False) -> None:
     """Pasa la operación a OPEN y arma SL + objetivos.
 
