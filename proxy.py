@@ -734,7 +734,12 @@ class Bitunix:
         }
         if self.cfg.tp_order_type == "LIMIT":
             body["tpOrderPrice"] = tp_price
-        return self._call("POST", "/api/v1/futures/tpsl/place_order", body=body, mutating=True) or {}
+        data = self._call("POST", "/api/v1/futures/tpsl/place_order", body=body, mutating=True)
+        # Bitunix responde [{"orderId": ...}]: sin esto ensure_partial_tps revienta en out.get(),
+        # no registra el TP y lo vuelve a colocar en cada tick (objetivo 1 duplicado).
+        if isinstance(data, list):
+            data = data[0] if data and isinstance(data[0], dict) else {}
+        return data or {}
 
     def cancel_tp_sl(self, symbol: str, order_id: str) -> Any:
         return self._call("POST", "/api/v1/futures/tpsl/cancel_order", mutating=True,
@@ -2000,6 +2005,14 @@ def selftest() -> int:
     checks += [(fmt_price(0.00883, 5) == "0.00883", "precio 5 decimales"),
                (fmt_qty(11.864, 1) == "11.8", "cantidad truncada hacia abajo")]
     print(" ", fmt_price(0.00873336, 5), fmt_qty(11.864, 1))
+
+    print("\n== respuesta de Bitunix al colocar un TP parcial ==")
+    stub = Bitunix(CFG)
+    stub._call = lambda *a, **k: [{"orderId": "tp-1"}]     # forma real de /tpsl/place_order
+    out = stub.place_partial_tp("CHZUSDT", "1", "0.00873", "100")
+    print(" ", out)
+    checks += [(isinstance(out, dict) and out.get("orderId") == "tp-1",
+                "TP parcial: respuesta en lista -> orderId (si no, se recoloca en cada tick)")]
 
     print()
     for passed, label in checks:
