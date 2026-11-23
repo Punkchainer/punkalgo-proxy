@@ -702,12 +702,16 @@ class Bitunix:
         return self._call("POST", "/api/v1/futures/trade/place_order", body=body, mutating=True) or {}
 
     def cancel_order(self, symbol: str, order_id: str | None = None, client_id: str | None = None) -> Any:
-        body: dict[str, Any] = {"symbol": symbol}
-        if order_id:
-            body["orderId"] = str(order_id)
-        elif client_id:
-            body["clientId"] = client_id
-        return self._call("POST", "/api/v1/futures/trade/cancel_order", body=body, mutating=True)
+        # La API no tiene /trade/cancel_order (404): se cancela con /trade/cancel_orders y una
+        # lista de órdenes; los rechazos por orden vienen en failureList, no en el code general.
+        item = {"orderId": str(order_id)} if order_id else {"clientId": client_id}
+        path = "/api/v1/futures/trade/cancel_orders"
+        data = self._call("POST", path, body={"symbol": symbol, "orderList": [item]}, mutating=True)
+        failures = data.get("failureList") if isinstance(data, dict) else None
+        if failures:
+            first = failures[0]
+            raise BitunixError(first.get("errorCode"), str(first.get("errorMsg") or "cancelación rechazada"), path)
+        return data
 
     def place_position_tp_sl(self, symbol: str, position_id: str, sl_price: str,
                              tp_price: str | None = None) -> dict:
@@ -2000,6 +2004,23 @@ def selftest() -> int:
     checks += [(fmt_price(0.00883, 5) == "0.00883", "precio 5 decimales"),
                (fmt_qty(11.864, 1) == "11.8", "cantidad truncada hacia abajo")]
     print(" ", fmt_price(0.00873336, 5), fmt_qty(11.864, 1))
+
+    print("\n== cancelar una orden ==")
+    stub, calls = Bitunix(CFG), []
+    stub._call = lambda method, path, **k: calls.append((path, k.get("body"))) or {"successList": [], "failureList": []}
+    stub.cancel_order("HYPEUSDT", order_id="2124945915042959360")
+    print(" ", calls)
+    checks += [(calls and calls[0] == ("/api/v1/futures/trade/cancel_orders",
+                                       {"symbol": "HYPEUSDT", "orderList": [{"orderId": "2124945915042959360"}]}),
+                "cancelar usa POST /trade/cancel_orders con orderList (/trade/cancel_order da 404)")]
+    stub._call = lambda *a, **k: {"successList": [], "failureList": [{"orderId": "1", "errorCode": 10013,
+                                                                      "errorMsg": "Order status error"}]}
+    try:
+        stub.cancel_order("HYPEUSDT", order_id="1")
+        rechazo = False
+    except BitunixError:
+        rechazo = True
+    checks += [(rechazo, "cancelación rechazada en failureList -> BitunixError")]
 
     print()
     for passed, label in checks:
