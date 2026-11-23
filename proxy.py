@@ -647,7 +647,13 @@ class Bitunix:
         else:
             return None
         data = self._call("GET", "/api/v1/futures/trade/get_order_detail", params=params)
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        # Bitunix informa una orden abierta como "NEW_": sin normalizar, check_waiting_fill no
+        # la reconoce como "NEW" y LIMIT_ORDER_TTL_SEC nunca cancela la entrada sin fill.
+        if isinstance(data.get("status"), str):
+            data = {**data, "status": data["status"].strip("_")}
+        return data
 
     def pending_tp_sl(self, symbol: str | None = None, position_id: str | None = None) -> list[dict]:
         params: dict[str, Any] = {"limit": 100}
@@ -2000,6 +2006,13 @@ def selftest() -> int:
     checks += [(fmt_price(0.00883, 5) == "0.00883", "precio 5 decimales"),
                (fmt_qty(11.864, 1) == "11.8", "cantidad truncada hacia abajo")]
     print(" ", fmt_price(0.00873336, 5), fmt_qty(11.864, 1))
+
+    print("\n== estado de una orden abierta ==")
+    stub = Bitunix(CFG)
+    stub._call = lambda *a, **k: {"orderId": "1", "status": "NEW_", "tradeQty": "0"}   # forma real de Bitunix
+    estado = (stub.order_detail(order_id="1") or {}).get("status")
+    print(" ", estado)
+    checks += [(estado == "NEW", "orden abierta 'NEW_' -> 'NEW' (si no, LIMIT_ORDER_TTL_SEC nunca cancela)")]
 
     print()
     for passed, label in checks:
